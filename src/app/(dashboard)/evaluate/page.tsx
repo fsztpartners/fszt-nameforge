@@ -78,7 +78,13 @@ export default function EvaluateWizard() {
 
       const data = await res.json();
       if (data.sessionId) {
-        router.push(`/evaluate/${data.sessionId}?candidateId=${data.candidateId}`);
+        const params = new URLSearchParams({
+          candidateId: data.candidateId,
+          name: nameToEvaluate.trim(),
+          mode: data.mode ?? 'local',
+          context: JSON.stringify(context),
+        });
+        router.push(`/evaluate/${data.sessionId}?${params.toString()}`);
       }
     } catch (error) {
       console.error('Evaluation failed:', error);

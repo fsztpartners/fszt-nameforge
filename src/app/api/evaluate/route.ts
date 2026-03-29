@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createAdminClient } from '@/lib/supabase/admin';
-import { runEvaluation } from '@/lib/agents/orchestrator';
 import type { BusinessContext } from '@/types/evaluation';
+import { randomUUID } from 'crypto';
 
-export const maxDuration = 300; // 5 minutes for full evaluation
+export const maxDuration = 300;
+
+// Local mode: works without Supabase. Returns mock IDs.
+// When NEXT_PUBLIC_SUPABASE_URL is set, switch to real DB.
+const isLocalMode = !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
@@ -13,12 +16,28 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Name and business description are required' }, { status: 400 });
   }
 
+  if (isLocalMode) {
+    // Local mock mode — no DB needed
+    const sessionId = randomUUID();
+    const candidateId = randomUUID();
+
+    return NextResponse.json({
+      sessionId,
+      candidateId,
+      name,
+      context,
+      mode: 'local',
+      message: 'Running in local mode (no database). Results will be simulated.',
+    }, { status: 202 });
+  }
+
+  // Production mode with Supabase
+  const { createAdminClient } = await import('@/lib/supabase/admin');
+  const { runEvaluation } = await import('@/lib/agents/orchestrator');
   const supabase = createAdminClient();
 
-  // TODO: Get user from auth session. Using a placeholder for now.
   const userId = body.userId ?? '00000000-0000-0000-0000-000000000000';
 
-  // Create evaluation session
   const { data: session, error: sessionError } = await supabase
     .from('evaluation_sessions')
     .insert({
@@ -40,7 +59,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: sessionError.message }, { status: 500 });
   }
 
-  // Create name candidate
   const { data: candidate, error: candidateError } = await supabase
     .from('name_candidates')
     .insert({
@@ -58,35 +76,15 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: candidateError.message }, { status: 500 });
   }
 
-  // Return immediately with IDs, run evaluation in background
-  const responseBody = {
-    sessionId: session.id,
-    candidateId: candidate.id,
-    message: 'Evaluation started. Subscribe to Supabase Realtime for live updates.',
-  };
-
-  // Fire-and-forget: run evaluation in the background
-  // The function stays alive for up to maxDuration
-  runEvaluation({
-    candidateId: candidate.id,
-    name,
-    context,
-    plan: 'pro',
-  })
+  runEvaluation({ candidateId: candidate.id, name, context, plan: 'pro' })
     .then(async (result) => {
-      await supabase
-        .from('evaluation_sessions')
-        .update({ status: 'completed', completed_at: new Date().toISOString() })
-        .eq('id', session.id);
+      await supabase.from('evaluation_sessions').update({ status: 'completed', completed_at: new Date().toISOString() }).eq('id', session.id);
       console.log(`Evaluation complete for "${name}": ${result.compositeScore}/100 (${result.overallRisk})`);
     })
     .catch(async (error) => {
       console.error(`Evaluation failed for "${name}":`, error);
-      await supabase
-        .from('evaluation_sessions')
-        .update({ status: 'failed' })
-        .eq('id', session.id);
+      await supabase.from('evaluation_sessions').update({ status: 'failed' }).eq('id', session.id);
     });
 
-  return NextResponse.json(responseBody, { status: 202 });
+  return NextResponse.json({ sessionId: session.id, candidateId: candidate.id, name, context, mode: 'live' }, { status: 202 });
 }
